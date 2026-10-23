@@ -201,6 +201,16 @@ character:
   and covers all printable ASCII. `auto` uses whatever `calibrate` saved (US until
   you calibrate). Add a layout by dropping a `*_ROWS` table into `hidkb.py`.
 
+> **Not every keyboard layout is supported yet.** Only US-QWERTY and French
+> AZERTY ship today. Other layouts (QWERTZ, UK, Spanish, Italian, Dvorak,
+> Nordic, …) and non-US consoles will mistype until someone adds them — and
+> `calibrate` will report a low-confidence match instead of guessing. **PRs
+> welcome:** a new layout is just one `<NAME>_ROWS` table of
+> `(usage, plain, shifted, altgr)` rows in `hidkb.py` plus the name in the
+> `--layout` choices and `LAYOUTS`; run `calibrate` against your host to fill it
+> in, and it works everywhere `send` does. Contributions of layouts, dead-key
+> handling, or hosts with different Shift/AltGr quirks are genuinely appreciated.
+
 ### SmileBASIC inverts Shift — on every key but AltGr
 
 Verified on a Switch 2 whose SmileBASIC keyboard is French: the editor renders
@@ -368,6 +378,15 @@ docs/implementation.md    why each trick exists, with the dmesg evidence
 Deep dive: [`docs/implementation.md`](docs/implementation.md) — the UDC race, the
 missing udev node, the fork-cost measurements, the report format, and the
 verification that caught a swapped-byte bug.
+
+## Contributing
+
+Issues and PRs welcome — especially **new keyboard layouts** (see *Keyboard
+layouts* above; only US-QWERTY and French AZERTY ship so far), hosts with
+different Shift/AltGr behaviour, dead-key handling, and other phones or UDCs.
+A new layout is a single `*_ROWS` table; run `calibrate` against your host to
+build it. Not every keyboard or console is supported yet, so if yours mistypes,
+that is a contribution waiting to happen rather than a dead end.
 
 ## License
 
