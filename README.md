@@ -69,7 +69,7 @@ Everything on-device is mksh builtins.
 |---|---|
 | `doctor` | read-only probe: root, UDC, configfs, `f_hid`, `mknod`, which gadget owns the port, which vendor HAL will fight you |
 | `setup` | creates `/config/usb_gadget/hidkb` + `hid_f` function; **does not touch the port**, so ADB stays up |
-| `send FILE` | binds, types the file, restores |
+| `send FILE` | binds (or reuses an already attached gadget), types the file, restores |
 | `selftest` | binds, types `hello`, restores; `--verify` also decodes keycodes on this host |
 | `teardown` | unbinds, removes the gadget, re-binds the stock one |
 | `verify` | runs `pc/watch_input.py` to decode this host's `/dev/input` |
@@ -92,6 +92,8 @@ Everything on-device is mksh builtins.
 --mode auto|own|vendor       auto: own gadget if creatable, else attach HID to the
                              vendor's gadget (default; required on Samsung)
 --udc NAME                   UDC name (default: the first in /sys/class/udc)
+--rebind                     force a UDC re-bind even when the gadget is already
+                             attached — see "Re-binding the UDC rebooted a phone"
 ```
 
 Estimate is printed before anything is sent: `keystrokes × (hold + gap)`.
@@ -148,6 +150,62 @@ come with that gadget, both handled automatically:
 ./hidkb.py teardown --mode vendor # removes them, hands the stock gadget back
 ```
 
+## Re-binding the UDC rebooted a phone
+
+This one is not a theory. It happened here, on an SM-S948B (Android 17, kernel
+`6.12.69-android16`), while the phone was plugged into a console and **already**
+typing-capable:
+
+```
+14:23  hidkb.py send probe.txt      <- re-ran bind: echo "" > g1/UDC, then echo UDC > g1/UDC
+14:23  phone reboots mid-command
+14:24  comes back up, no ADB over Wi-Fi (adb tcpip does not survive a reboot)
+```
+
+What the device says afterwards:
+
+| Evidence | Value | Reading |
+|---|---|---|
+| `/proc/uptime` | 387 s | it really rebooted |
+| `ro.boot.bootreason` | `reboot` | a reboot that was *requested*, not `kernel_panic`/`watchdog` |
+| `/sys/fs/pstore` | empty | no crashed-kernel trace was captured |
+| `/data/tombstones` | nothing new | no native crash at that time |
+| PDIC log `POR` | `0` | no power-on / PMIC reset |
+
+The cause is therefore **not proven**. What is proven is that the only
+destructive operation in that run was the UDC dance, and that the dance was
+**unnecessary**: at the time, `g1/UDC = a600000.dwc3`, UDC state `configured`,
+`/dev/hidg0 = 447:0` and the report descriptor was correct — the keyboard was
+already live and `send` only had to write reports to `/dev/hidg0`.
+
+So the rule this tool now enforces:
+
+> **Attach once, type many.** Writing the UDC is the risk. Type into a live
+> attachment forever; do not "clean up" a working gadget.
+
+`hidkb_bind()` checks `hidkb_attached()` first — HID function bound, linked in
+the bound config, `dev` present, gadget's `UDC` equal to the detected
+controller — and if all of that holds it types immediately and never touches
+`UDC`. `doctor` tells you which path the next `send` will take:
+
+```
+[OK]   HID attached     typing reuses it, no UDC write
+[WARN] HID attached     not attached: the next send must bind, i.e. write the UDC
+```
+
+`--rebind` restores the old always-rebind behaviour. Use it deliberately, not
+to fix a gadget that is already working.
+
+If you do lose the phone: root survives (KernelSU came back), and
+
+```bash
+adb shell su -c 'setprop persist.adb.tcp.port 5555'   # survives future reboots
+adb tcpip 5555 && adb connect <phone-ip>:5555
+```
+
+costs one trip on the USB cable — which, on a single-port phone, is the port you
+wanted for the target.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -163,6 +221,7 @@ come with that gadget, both handled automatically:
 | typed text is uppercase where it should be lowercase | the target inverts case (SmileBASIC) | `--profile smilebasic` or `--case-invert` |
 | indentation doubles each line | target editor inherits indentation | `--indent inherit` |
 | ADB/MTP gone after a run | gadget still bound | `hidkb.py teardown`; the trap/watchdog normally does it already |
+| phone rebooted right after `send` started | UDC re-bind — only observed once, cause unproven | nothing to fix: the next `send` reuses the live gadget instead of re-binding; `--rebind` is opt-in |
 | phone charges from the host, nothing enumerates | USB role reversed | unplug, replug, or use a data-capable cable |
 
 ## Safety
@@ -173,8 +232,12 @@ come with that gadget, both handled automatically:
   watchdog subshell. The stock gadget is recorded in
   `/data/local/tmp/hidkb-owner` and re-bound automatically.
 * Ctrl-C during `send` restores the port from the host side.
-* The worst realistic outcome is "ADB is gone until you unplug/replug" — no
-  persistent state is written outside `/data/local/tmp` and configfs.
+* Writing `UDC` is the one genuinely risky operation — it fights the vendor USB
+  HAL and has rebooted a phone once, with no panic trace to explain it. It is
+  skipped whenever the gadget is already attached. No reboot is needed to
+  recover: root and the app's data survive.
+* Nothing persistent is written outside `/data/local/tmp` and configfs, so a
+  reboot is always a complete reset of this tool's state.
 
 ## Files
 

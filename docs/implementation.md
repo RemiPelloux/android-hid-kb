@@ -76,6 +76,17 @@ Do not add latency between those two writes.
 `GADGET/UDC` is also the authoritative check — read it back, don't trust the
 exit code (writing to an already-bound UDC fails but the shell only sees `1`).
 
+**Caveat: the race is the riskiest thing this tool does.** On 2026-10-23 a
+re-bind of the vendor gadget on an SM-S948B (Android 17, kernel
+`6.12.69-android16`) rebooted the phone, mid-`send`, with
+`ro.boot.bootreason=reboot`, an empty pstore, no tombstone, and PDIC `POR:0` —
+so no kernel panic was recorded and the cause is unproven. The re-bind was also
+unnecessary: the gadget was already `configured` with a live `/dev/hidg0`.
+`hidkb_bind()` therefore checks `hidkb_attached()` (function bound, linked in a
+bound config, `dev` present, `UDC` equal to the detected controller) and skips
+the writes above entirely; `--rebind` forces the old path. See the README
+section "Re-binding the UDC rebooted a phone".
+
 ## 2b. Problem: you cannot always create a gadget directory
 
 Only after this worked for a while did the next trap appear. Any
