@@ -253,6 +253,10 @@ hidkb_bind() {
 	# "UDC core: <gadget>: couldn't find an available UDC or it's busy".
 	# When we are the incumbent (vendor mode) the HAL can only re-bind this same
 	# gadget, so the race cannot be lost.
+	# Keep the kernel log across a bad roll: dmesg dies with the boot, /data does not.
+	# If the UDC write below ever reboots the device again, this file is the only
+	# surviving evidence of what the gadget/HAL were doing at the time.
+	[ -d /data/local/tmp ] && dmesg >/data/local/tmp/hidkb-pre-bind-dmesg.txt 2>/dev/null
 	[ -n "$OWNER" ] && echo "" >"$OWNER/UDC" 2>/dev/null
 	# Now that the gadget is unbound the config accepts the HID function link.
 	_hidkb_ensure_link || {
