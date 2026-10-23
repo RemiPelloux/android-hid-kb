@@ -203,7 +203,11 @@ def render_script(keys, *, source: str, hold_ms: int, gap_ms: int, prewait: floa
     # typing must continue. INT/TERM/EXIT always hands the port back.
     w('trap "" HUP')
     w("trap 'hidkb_restore; exit 0' INT TERM EXIT")
-    w(f'( read -t {watchdog} _wd < /dev/zero; hidkb_msg "watchdog fired"; hidkb_restore ) &')
+    # Set up the idle (non-spinning) sleep in the parent shell first, so the fifo
+    # fd is open before the watchdog subshell is forked and inherits it. Both the
+    # main loop and the watchdog then sleep with ~0 CPU instead of pinning a core.
+    w("hidkb_nap_init")
+    w(f'( hidkb_nap {watchdog}; hidkb_msg "watchdog fired"; hidkb_restore ) &')
     w("WDPID=$!")
     w("hidkb_bind || exit 1")
     w(f"hidkb_nap {prewait}")

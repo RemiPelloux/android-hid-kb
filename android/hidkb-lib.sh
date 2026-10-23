@@ -30,13 +30,56 @@ HIDKB_STATE=${HIDKB_STATE:-/data/local/tmp/hidkb-active}
 HIDKB_OWNER_FILE=${HIDKB_OWNER_FILE:-/data/local/tmp/hidkb-owner}
 HIDKB_ACTIVE=${HIDKB_ACTIVE:-}
 HIDKB_CONFIG=${HIDKB_CONFIG:-}
+HIDKB_NAP_FIFO=${HIDKB_NAP_FIFO:-/data/local/tmp/hidkb-nap.fifo}
+_hidkb_nap_ready=
 
 hidkb_msg() { echo "hidkb: $*"; }
 
-# Fractional sleep with no subprocess. mksh's `read -t` is accurate to ~1 ms
-# and reading from /dev/zero never delivers a newline, so it always times out.
-# Measured: 100 calls of 0.04 s = 4040 ms, shell RSS stable at 3.4 MB.
-hidkb_nap() { read -t "$1" _hidkb_sleep < /dev/zero 2>/dev/null; return 0; }
+# Fractional sleep with no subprocess in the hot path. mksh's `read -t` is
+# accurate to ~1 ms, so the keystroke schedule stays tight without forking a
+# `sleep`.
+#
+# The source of the fd matters. Reading from /dev/zero times out correctly, but
+# /dev/zero is *always* readable, so `read` spins byte-by-byte for the whole
+# interval and pins a CPU core at 100 % (measured: ~2.98 s of CPU for a 3 s nap).
+# Across a 6.5-minute transcript that is one core maxed the entire run, and the
+# watchdog adds a second — enough heat and current draw on a console-powered
+# phone to brown it out (see the reboot note in the README).
+#
+# Instead, open a fifo read+write once (one fork at init, outside the hot path)
+# and read from it. Nothing is ever written, so `read -t` blocks idle in poll()
+# and times out at the deadline using ~0 CPU, with the same ~1 ms accuracy.
+hidkb_nap_init() {
+	[ -n "$_hidkb_nap_ready" ] && return 0
+	rm -f "$HIDKB_NAP_FIFO" 2>/dev/null
+	if mkfifo "$HIDKB_NAP_FIFO" 2>/dev/null && exec 7<>"$HIDKB_NAP_FIFO" 2>/dev/null; then
+		_hidkb_nap_ready=fifo
+	else
+		# Fallback: the busy-wait still keeps correct time, just hot. Better a
+		# warm run than no run if mkfifo is unavailable.
+		_hidkb_nap_ready=zero
+		hidkb_msg "nap fifo unavailable, falling back to busy-wait sleep"
+	fi
+	return 0
+}
+
+hidkb_nap() {
+	[ -n "$_hidkb_nap_ready" ] || hidkb_nap_init
+	if [ "$_hidkb_nap_ready" = fifo ]; then
+		read -t "$1" _hidkb_sleep <&7 2>/dev/null
+	else
+		read -t "$1" _hidkb_sleep < /dev/zero 2>/dev/null
+	fi
+	return 0
+}
+
+# Release the fifo fd and remove the file. Safe to call when nap was never set up.
+hidkb_nap_cleanup() {
+	[ "$_hidkb_nap_ready" = fifo ] && exec 7>&- 2>/dev/null
+	rm -f "$HIDKB_NAP_FIFO" 2>/dev/null
+	_hidkb_nap_ready=
+	return 0
+}
 
 hidkb_all_gadgets() { ls -d /config/usb_gadget/*/ 2>/dev/null; }
 
@@ -305,6 +348,7 @@ hidkb_restore() {
 	if [ -n "$HIDKB_HOST_GADGET" ] && [ -d "$HIDKB_HOST_GADGET" ]; then
 		echo "$HIDKB_UDC" >"$HIDKB_HOST_GADGET/UDC" 2>/dev/null
 	fi
+	hidkb_nap_cleanup
 	hidkb_msg "restored ${HIDKB_HOST_GADGET:-nothing}"
 }
 

@@ -164,7 +164,8 @@ on the device:
 | `usleep 1000` (external, forks) | **8.3 ms** |
 | `printf … > /dev/null` (external, forks) | **6.5 ms** |
 | `print -n … > /dev/null` (mksh **builtin**) | **0.03 ms** |
-| `read -t 0.05 </dev/zero` (mksh **builtin**) | **50 ms ±1 ms** |
+| `read -t 0.05 </dev/zero` (mksh **builtin**) | **50 ms ±1 ms, but 100 % of one CPU core** |
+| `read -t 0.05 <&7` (fifo, no writer) | **50 ms ±1 ms, ~0 % CPU** |
 
 A 7 620-keystroke transcript needs ~15 240 reports. With forks that is ~2 min of
 pure `fork()` overhead *plus* the real delays, and jitter that corrupts typing.
@@ -181,9 +182,17 @@ Notes:
 
 * mksh's `print` builtin understands **`\0NNN` octal only** — `\xNN` and bare
   `\NNN` are emitted literally. `\0002` = `0x02`, `\0377` = `0xff`.
-* `read -t` accepts fractional seconds and is accurate to ~1 ms. Reading from
-  `/dev/zero` never yields a newline, so it always times out; shell RSS stayed at
-  3.4 MB over 1 000 iterations, so there is no buffer blow-up.
+* `read -t` accepts fractional seconds and is accurate to ~1 ms, and reading a
+  source that never yields a newline always times out at the deadline. **Which
+  source matters, and this was a real bug.** `/dev/zero` is *always* readable, so
+  `read` spins byte-by-byte for the whole interval: correct timing, but one CPU
+  core pinned at 100 % for every nap. Across a 6.5-minute transcript that is a
+  core maxed the entire run, and the watchdog's `read -t 1800 </dev/zero` pinned a
+  second — measured ~2.98 s of CPU per 3 s of sleep. The fix is to read from a
+  **fifo with no writer**: open it read+write once (`exec 7<>fifo`, one fork at
+  init, outside the hot path), then `read -t "$1" <&7` blocks idle in `poll()` and
+  times out with ~0 CPU and the same ~1 ms accuracy. Shell RSS stayed at 3.4 MB
+  either way; the cost `/dev/zero` hid was heat and current, not memory.
 * `printf` is **not** a builtin here (`type printf` → tracked alias to
   `/system/bin/printf`), so it must not be used in the hot path.
 * Open the endpoint once (`exec 4> /dev/hidg0`) and write with `>&4`; reopening

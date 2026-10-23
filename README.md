@@ -236,6 +236,17 @@ What that means in practice:
 * do not type into a controller that is not `state=configured`;
 * a cable replug is the safe way to get a fresh enumeration.
 
+One concrete stressor *was* found and removed. The on-device sleep used
+`read -t <s> < /dev/zero`, which keeps correct time but busy-waits: `/dev/zero`
+is always readable, so the shell spins at 100 % of a CPU core for the whole
+interval (measured ~2.98 s of CPU per 3 s of sleep). During a run that pinned one
+core for the main typing loop and a second for the 30-minute watchdog — minutes
+of full load and current draw on a phone powered from a console port, which is
+exactly the kind of thermal/brownout condition that produces a `bootreason=reboot`
+with an empty pstore. The sleep now reads from a fifo with no writer, which blocks
+idle in `poll()` at ~0 % CPU with the same ±1 ms accuracy. This does not *prove*
+it caused the reboots, but it was a real, measured load that is now gone.
+
 If you do lose the phone: root survives (KernelSU came back), and
 
 ```bash
