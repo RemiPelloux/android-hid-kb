@@ -39,7 +39,6 @@ REMOTE_DIR = "/data/local/tmp"
 REMOTE_LIB = f"{REMOTE_DIR}/hidkb-lib.sh"
 REMOTE_DESC = f"{REMOTE_DIR}/hidkb-report_desc.bin"
 REMOTE_RUN = f"{REMOTE_DIR}/hidkb-run.sh"
-REMOTE_PROBE = f"{REMOTE_DIR}/hidkb-probe.sh"
 REMOTE_LOG = f"{REMOTE_DIR}/hidkb.log"
 REMOTE_OWNER = f"{REMOTE_DIR}/hidkb-owner"
 
@@ -184,7 +183,7 @@ def report(m: int, key: int) -> str:
 
 def render_script(keys, *, source: str, hold_ms: int, gap_ms: int, prewait: float,
                   postwait: float, backspaces: int, watchdog: int, progress: int,
-                  gadget: str, udc: str, mode: str = "auto", rebind: bool = False) -> str:
+                  gadget: str, udc: str, mode: str = "auto") -> str:
     hold = f"{hold_ms / 1000:.3f}"
     gap = f"{gap_ms / 1000:.3f}"
     out = []
@@ -196,7 +195,6 @@ def render_script(keys, *, source: str, hold_ms: int, gap_ms: int, prewait: floa
     w(f"HIDKB_GADGET={gadget}")
     w(f"HIDKB_MODE={mode}")
     w(f"HIDKB_UDC={udc or ''}")
-    w(f"HIDKB_REBIND={1 if rebind else 0}")
     w(f"HIDKB_LOG={REMOTE_LOG}")
     w('exec >>"$HIDKB_LOG" 2>&1')
     w('echo "=== hidkb run: $(date) ==="')
@@ -267,11 +265,7 @@ def detect_serial(explicit):
     if not ready:
         raise SystemExit("no adb device. Plug the phone in, or `adb connect <ip>:5555`.")
     if len(ready) > 1:
-        net = [d for d in ready if ":" in d]
-        hint = (f"\n  hint: -s {net[0]} (Wi-Fi) keeps the phone's USB port free for the target"
-                if net else "")
-        raise SystemExit("multiple adb devices, choose one with -s:\n  "
-                         + "\n  ".join(ready) + hint)
+        raise SystemExit("multiple adb devices, choose one with -s:\n  " + "\n  ".join(ready))
     return ready[0]
 
 
@@ -279,16 +273,16 @@ def push(serial, local, remote):
     adb(serial, ["push", str(local), remote], check=True, timeout=120)
 
 
-def su_shell(serial, body, *, timeout=120, capture=True, remote=REMOTE_RUN):
+def su_shell(serial, body, *, timeout=120, capture=True):
     """Push a tiny script and run it as root (KernelSU/Magisk `su -c`)."""
     with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
         fh.write(body)
         path = fh.name
     try:
-        push(serial, path, remote)
+        push(serial, path, REMOTE_RUN)
     finally:
         os.unlink(path)
-    return adb(serial, ["shell", f"su -c 'sh {remote}'"], timeout=timeout, capture=capture)
+    return adb(serial, ["shell", f"su -c 'sh {REMOTE_RUN}'"], timeout=timeout, capture=capture)
 
 
 def ensure_remote_env(serial, gadget=DEFAULT_GADGET):
@@ -302,19 +296,6 @@ def ensure_remote_env(serial, gadget=DEFAULT_GADGET):
     finally:
         os.unlink(path)
     return gadget
-
-
-def gadget_attached(serial, gadget):
-    """True when our HID function is bound to a live gadget (read-only probe)."""
-    body = (f". {REMOTE_LIB}\nHIDKB_GADGET={gadget}\n"
-            "hidkb_detect_udc >/dev/null 2>&1 || exit 0\n"
-            "hidkb_locate >/dev/null 2>&1 || exit 0\n"
-            "hidkb_attached && echo ATTACHED\n")
-    try:
-        res = su_shell(serial, body, timeout=60, remote=REMOTE_PROBE)
-    except Exception:
-        return False
-    return "ATTACHED" in (res.stdout or "")
 
 
 def read_log(serial, offset):
@@ -340,17 +321,6 @@ echo "owners=$(for g in /config/usb_gadget/*/; do v=$(cat "$g/UDC" 2>/dev/null);
 echo "hidg_class=$([ -e /sys/class/hidg ] && echo yes || echo no)"
 echo "hidg_dev=$([ -e /dev/hidg0 ] && echo yes || echo no)"
 echo "hidg_majmin=$(cat /sys/class/hidg/hidg0/dev 2>/dev/null)"
-HIDATT=no
-for g in /config/usb_gadget/*/; do
-  [ -s "${g}functions/hid.usb0/dev" ] || continue
-  [ -e "${g}configs/hid.usb0" ] && continue
-  for c in "${g}"configs/*/; do [ -e "${c}hid.usb0" ] || continue; done
-  for u in /sys/class/udc/*; do
-    [ -e "$u" ] || continue
-    [ "$(cat "${g}UDC" 2>/dev/null)" = "${u##*/}" ] && HIDATT=yes
-  done
-done
-echo "hid_attached=$HIDATT"
 echo "f_hid_module=$([ -d /sys/module/usb_f_hid ] && echo module || echo no)"
 CONF=$( (zcat /proc/config.gz 2>/dev/null || cat /boot/config-$(uname -r) 2>/dev/null) | grep -E '^CONFIG_USB_CONFIGFS_F_HID' | head -1)
 echo "f_hid_config=${CONF:-unknown}"
@@ -398,9 +368,6 @@ def cmd_doctor(args):
         (info.get("usb_hal") or "none") + "  (will fight for the UDC; we race it)", warn_only=True)
     add("/dev/hidg0 node", info.get("hidg_dev") == "yes",
         "created by this tool via mknod" if info.get("hidg_dev") != "yes" else "present", warn_only=True)
-    add("HID attached", info.get("hid_attached") == "yes",
-        "typing reuses it, no UDC write" if info.get("hid_attached") == "yes"
-        else "not attached: the next send must bind, i.e. write the UDC", warn_only=True)
     add("gadget dir", True, f"{args.gadget} " + ("exists" if args.gadget in info.get("gadgets", "") else "not created yet"))
 
     print(f"\n  hidkb doctor — {info.get('model', '?')} / Android {info.get('release', '?')} / {info.get('kernel', '?')}\n")
@@ -453,7 +420,7 @@ def plan(args, text_lines, source):
         keys, source=source, hold_ms=args.hold, gap_ms=args.gap, prewait=args.prewait,
         postwait=args.postwait, backspaces=args.backspaces, watchdog=args.watchdog,
         progress=args.progress, gadget=args.gadget, udc=args.udc,
-        mode=getattr(args, "mode", "auto"), rebind=getattr(args, "rebind", False),
+        mode=getattr(args, "mode", "auto"),
     )
     return keys, script, case_invert, indent
 
@@ -486,13 +453,7 @@ def do_send(args, text_lines, source):
 
     adb(serial, ["shell", f"su -c 'rm -f {REMOTE_LOG} {REMOTE_OWNER}'"])
 
-    if gadget_attached(serial, args.gadget):
-        if getattr(args, "rebind", False):
-            print("  gadget is already attached; --rebind forces the controller re-bind\n")
-        else:
-            print("  gadget already attached — typing without touching the UDC\n")
-    else:
-        print("  binding gadget and typing — do not touch the target device\n")
+    print("  binding gadget and typing — do not touch the target device\n")
     proc = subprocess.Popen(
         adb_base(serial) + ["shell", f"su -c 'sh {REMOTE_RUN}'"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -592,9 +553,6 @@ def add_send_args(p, *, standalone=True):
                    help="auto: use our own gadget if it can be created, else attach HID to "
                         "the vendor gadget (required on Samsung after a few gadget dirs)")
     p.add_argument("--udc", default="", help="UDC name (default: first in /sys/class/udc)")
-    p.add_argument("--rebind", action="store_true",
-                   help="force a UDC re-bind even when the gadget is already attached "
-                        "(re-binding the controller rebooted a Samsung phone once; see README)")
 
 
 def main(argv=None):

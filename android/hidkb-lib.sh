@@ -220,17 +220,6 @@ hidkb_setup_gadget() {
 
 # Bind the gadget to the UDC. This is the only disruptive step: it steals the
 # port from the vendor gadget, so ADB-over-USB and MTP die while it is bound.
-# True when our HID function is already live on a bound gadget. Writing to UDC in
-# that state is pure risk — re-binding the controller rebooted a Samsung phone
-# once (see README, "Re-binding the UDC rebooted a phone") — so hidkb_bind()
-# reuses the live attachment instead of tearing the controller down.
-hidkb_attached() {
-	[ -n "${HIDKB_ACTIVE:-}" ] && [ -n "${HIDKB_UDC:-}" ] || return 1
-	[ -s "$HIDKB_ACTIVE/functions/hid.usb0/dev" ] || return 1
-	[ -e "$HIDKB_CONFIG/hid.usb0" ] || return 1
-	[ "$(cat "$HIDKB_ACTIVE/UDC" 2>/dev/null)" = "$HIDKB_UDC" ] || return 1
-	return 0
-}
 hidkb_bind() {
 	hidkb_detect_udc || return 1
 	hidkb_locate || { hidkb_msg "run setup first"; return 1; }
@@ -240,23 +229,11 @@ hidkb_bind() {
 	HIDKB_HOST_GADGET=${HIDKB_HOST_GADGET:-$OWNER}
 	[ -n "$OWNER" ] && print -r -- "$OWNER" >"$HIDKB_OWNER_FILE" 2>/dev/null
 
-	# The function is already bound and the host has enumerated it: keep it. The
-	# UDC write below is what kills the vendor HAL (and once, the whole phone).
-	if [ "${HIDKB_REBIND:-0}" != 1 ] && hidkb_attached; then
-		hidkb_mknod || return 1
-		hidkb_msg "HID already attached to $HIDKB_UDC, leaving the UDC alone"
-		return 0
-	fi
-
 	# Zero-delay race: release the incumbent, then claim the UDC immediately.
 	# Any gap >= a few ms lets the vendor HAL re-bind first and we lose with
 	# "UDC core: <gadget>: couldn't find an available UDC or it's busy".
 	# When we are the incumbent (vendor mode) the HAL can only re-bind this same
 	# gadget, so the race cannot be lost.
-	# Keep the kernel log across a bad roll: dmesg dies with the boot, /data does not.
-	# If the UDC write below ever reboots the device again, this file is the only
-	# surviving evidence of what the gadget/HAL were doing at the time.
-	[ -d /data/local/tmp ] && dmesg >/data/local/tmp/hidkb-pre-bind-dmesg.txt 2>/dev/null
 	[ -n "$OWNER" ] && echo "" >"$OWNER/UDC" 2>/dev/null
 	# Now that the gadget is unbound the config accepts the HID function link.
 	_hidkb_ensure_link || {
