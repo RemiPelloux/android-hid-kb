@@ -183,7 +183,7 @@ def report(m: int, key: int) -> str:
 
 def render_script(keys, *, source: str, hold_ms: int, gap_ms: int, prewait: float,
                   postwait: float, backspaces: int, watchdog: int, progress: int,
-                  gadget: str, udc: str) -> str:
+                  gadget: str, udc: str, mode: str = "auto") -> str:
     hold = f"{hold_ms / 1000:.3f}"
     gap = f"{gap_ms / 1000:.3f}"
     out = []
@@ -193,6 +193,7 @@ def render_script(keys, *, source: str, hold_ms: int, gap_ms: int, prewait: floa
     w(f"# source={source} keystrokes={len(keys)} hold={hold_ms}ms gap={gap_ms}ms")
     w(f". {REMOTE_LIB}")
     w(f"HIDKB_GADGET={gadget}")
+    w(f"HIDKB_MODE={mode}")
     w(f"HIDKB_UDC={udc or ''}")
     w(f"HIDKB_LOG={REMOTE_LOG}")
     w('exec >>"$HIDKB_LOG" 2>&1')
@@ -226,6 +227,7 @@ def render_script(keys, *, source: str, hold_ms: int, gap_ms: int, prewait: floa
     if postwait:
         w(f"hidkb_nap {postwait}")
     w("kill $WDPID 2>/dev/null")
+    w("trap - INT TERM EXIT   # the explicit restore below is the last one")
     w("hidkb_restore")
     return "\n".join(out) + "\n"
 
@@ -326,6 +328,7 @@ echo "usb_services=$(getprop | grep -oE 'init\.svc\.[a-z0-9_.-]*usb[a-z0-9_.-]*:
 echo "usb_hal=$(ps -A -o NAME 2>/dev/null | grep -E 'android.hardware.usb-service' | head -1)"
 MK=$(mknod /data/local/tmp/.hidkb-mknod c 1 3 2>&1 && echo ok && rm -f /data/local/tmp/.hidkb-mknod)
 echo "mknod=${MK:-failed}"
+echo "android_devs=$(for d in /sys/devices/virtual/android_usb/android*; do [ -e "$d" ] && printf '%s ' "${d##*/}"; done)"
 """
 
 
@@ -351,8 +354,13 @@ def cmd_doctor(args):
     add("configfs mounted", info.get("configfs") == "yes", "/config/usb_gadget")
     udcs = info.get("udcs", "").split()
     add("USB device controller", bool(udcs), info.get("udcs", "") or "host-only port, no gadget mode")
-    add("hidg class (f_hid present)", info.get("hidg_class") == "yes",
-        info.get("f_hid_config", "") or "CONFIG_USB_CONFIGFS_F_HID not found in config")
+    # /sys/class/hidg only exists while a HID function is bound (it disappears
+    # with the last hidg device), so judge f_hid by the kernel config instead.
+    fhid = info.get("f_hid_config", "")
+    fhid_ok = fhid.endswith("=y") or fhid.endswith("=m")
+    add("f_hid in kernel", fhid_ok,
+        (fhid or "CONFIG_USB_CONFIGFS_F_HID not found")
+        + ("  (hidg class appears when a function binds)" if not info.get("hidg_class") == "yes" else "  (hidg class live)"))
     add("mknod available", info.get("mknod") == "ok", "needed: Android's ueventd has no hidg rule")
     owner = info.get("owners", "").strip()
     add("UDC owned by", True, owner or "nothing")
@@ -366,9 +374,13 @@ def cmd_doctor(args):
     for status, check, detail in rows:
         print(f"  [{status}] {check:28} {detail}")
     print()
-    if info.get("hidg_class") != "yes":
+    if not (fhid.endswith("=y") or fhid.endswith("=m")):
         print("  The kernel has no f_hid. If CONFIG_USB_CONFIGFS_F_HID=m, try:"
               "\n    su -c 'modprobe usb_f_hid'\n")
+    leaked = info.get("android_devs", "").count(" ")
+    if leaked >= 3:
+        print(f"  {leaked} leftover android_usb platform devices: creating new gadget"
+              " directories will fail.\n  Use --mode vendor (default auto does this for you).\n")
     if not udcs:
         print("  No UDC means this phone cannot act as a USB device at all"
               " (some devices need a USB-C OTG/role switch).\n")
@@ -378,7 +390,8 @@ def cmd_doctor(args):
 def cmd_setup(args):
     serial = detect_serial(args.serial)
     ensure_remote_env(serial, args.gadget)
-    res = su_shell(serial, f". {REMOTE_LIB}\nHIDKB_GADGET={args.gadget}\nhidkb_setup_gadget\n",
+    res = su_shell(serial, f". {REMOTE_LIB}\nHIDKB_GADGET={args.gadget}\n"
+                           f"HIDKB_MODE={getattr(args, 'mode', 'auto')}\nhidkb_setup_gadget\n",
                    timeout=120)
     sys.stdout.write(res.stdout or "")
     sys.stderr.write(res.stderr or "")
@@ -388,7 +401,8 @@ def cmd_setup(args):
 def cmd_teardown(args):
     serial = detect_serial(args.serial)
     ensure_remote_env(serial, args.gadget)
-    res = su_shell(serial, f". {REMOTE_LIB}\nHIDKB_GADGET={args.gadget}\nhidkb_teardown\n", timeout=120)
+    res = su_shell(serial, f". {REMOTE_LIB}\nHIDKB_GADGET={args.gadget}\n"
+                           f"HIDKB_MODE={getattr(args, 'mode', 'auto')}\nhidkb_teardown\n", timeout=120)
     sys.stdout.write(res.stdout or "")
     sys.stderr.write(res.stderr or "")
     return 0 if res.returncode == 0 else 1
@@ -406,6 +420,7 @@ def plan(args, text_lines, source):
         keys, source=source, hold_ms=args.hold, gap_ms=args.gap, prewait=args.prewait,
         postwait=args.postwait, backspaces=args.backspaces, watchdog=args.watchdog,
         progress=args.progress, gadget=args.gadget, udc=args.udc,
+        mode=getattr(args, "mode", "auto"),
     )
     return keys, script, case_invert, indent
 
@@ -534,6 +549,9 @@ def add_send_args(p, *, standalone=True):
     p.add_argument("--dry-run", action="store_true", help="generate the script, send nothing")
     p.add_argument("--out", help="keep the generated on-device script at this path")
     p.add_argument("--gadget", default=DEFAULT_GADGET, help="configfs gadget directory")
+    p.add_argument("--mode", choices=["auto", "own", "vendor"], default="auto",
+                   help="auto: use our own gadget if it can be created, else attach HID to "
+                        "the vendor gadget (required on Samsung after a few gadget dirs)")
     p.add_argument("--udc", default="", help="UDC name (default: first in /sys/class/udc)")
 
 
@@ -555,6 +573,7 @@ def main(argv=None):
     ):
         p = sub.add_parser(name, help=helptext)
         p.add_argument("--gadget", default=DEFAULT_GADGET)
+        p.add_argument("--mode", choices=["auto", "own", "vendor"], default="auto")
         p.set_defaults(func=fn)
 
     s = sub.add_parser("send", help="type a file into the host")

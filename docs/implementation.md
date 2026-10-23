@@ -76,9 +76,65 @@ Do not add latency between those two writes.
 `GADGET/UDC` is also the authoritative check — read it back, don't trust the
 exit code (writing to an already-bound UDC fails but the shell only sees `1`).
 
+## 2b. Problem: you cannot always create a gadget directory
+
+Only after this worked for a while did the next trap appear. Any
+`mkdir /config/usb_gadget/<name>` started failing:
+
+```
+mkdir: '/config/usb_gadget/hidkb': Out of memory
+```
+
+`dmesg` after the failure names the real error:
+
+```
+kobject_add_internal failed for android2 with -EEXIST, don't try to register
+things with the same name in the same directory.
+    android_device_create+0xa0/0x138
+    gadgets_make+0x26c/0x328
+```
+
+Samsung's patched `gadgets_make()` calls `android_device_create()` for every
+gadget directory and never destroys the device, so
+`/sys/devices/virtual/android_usb/androidN` accumulates and the name lookup
+collides. `-EEXIST` surfaces to userspace as `ENOMEM`, which sends you looking
+for a memory problem that does not exist. Fixing it requires a reboot, and on a
+locked bootloader that means redoing the root exploit.
+
+**Fix: don't create a gadget at all.** The vendor HAL already owns a complete,
+enumerating gadget (`g1`, config `b.1`). Add a `hid.usb0` function to it, link
+it into the existing config, and re-bind the same gadget. The HAL racing us is
+now harmless — it can only ever bind that same gadget back.
+
+This became `--mode vendor`, and `auto` falls back to it.
+
+### Corollary: a bound config is frozen
+
+Two write paths that worked on a private gadget fail on the vendor's, because
+its gadget is *bound* to the UDC almost all the time:
+
+```
+# linking a function into a config that is bound
+ln: cannot create symbolic link ... : Invalid argument        # -EINVAL
+
+# writing an attribute of a bound function
+cat: xwrite: Device or resource busy                          # -EBUSY
+```
+
+Both are handled by ordering rather than by retrying:
+
+* the link is made inside `hidkb_bind()`, in the window after the incumbent
+  gadget is released and before ours is bound;
+* `setup` compares each attribute with the desired value and only writes when it
+  differs, so it never touches a live function.
+
 ## 3. Problem: `/dev/hidg0` does not exist
 
-The kernel creates the char device and a `hidg` class entry:
+The kernel creates the char device and a `hidg` class entry — **only while a HID
+function is bound**. When the last one goes away, `/sys/class/hidg` disappears
+entirely, so it is not a usable "is f_hid compiled in?" probe; read
+`/proc/config.gz` for that. Also, the id is global and not reused immediately,
+so never assume `/dev/hidg0`:
 
 ```
 $ ls /sys/class/hidg/
@@ -89,10 +145,13 @@ $ cat /sys/class/hidg/hidg0/dev
 
 but Android has **no udev**; `ueventd` only creates nodes listed in its `.rc`
 files, and `hidg` isn't one of them. So `hidkb-lib.sh` mknods it from the
-major:minor in sysfs (never hardcode `447:0` — it is allocated dynamically):
+major:minor in sysfs (never hardcode `447:0` — it is allocated dynamically).
+The gadget's own function directory is the authoritative source, because the
+class device may be `hidg1`, `hidg2`, …:
 
 ```sh
-mknod /dev/hidg0 c $(cut -d: -f1 ...) $(cut -d: -f2 ...)
+cat /config/usb_gadget/hidkb/functions/hid.usb0/dev     # -> 447:0
+mknod /dev/hidg0 c 447 0 && chmod 660 /dev/hidg0
 ```
 
 ## 4. Problem: no scripting runtime, and forks are expensive

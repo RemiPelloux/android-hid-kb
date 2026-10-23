@@ -88,7 +88,10 @@ Everything on-device is mksh builtins.
 --progress N                 emit a progress line every N keystrokes
 --dry-run                    generate the on-device script, send nothing
 --out PATH                   keep the generated script
---gadget DIR / --udc NAME    non-default paths
+--gadget DIR                 our own configfs gadget dir (mode=own)
+--mode auto|own|vendor       auto: own gadget if creatable, else attach HID to the
+                             vendor's gadget (default; required on Samsung)
+--udc NAME                   UDC name (default: the first in /sys/class/udc)
 ```
 
 Estimate is printed before anything is sent: `keystrokes × (hold + gap)`.
@@ -116,12 +119,44 @@ SmileBASIC 4.4.9, and typing it by hand on a console is miserable.
 Verify a transfer before using it: `examples/indent-test.bas` must arrive with
 leading-space counts `0,1,1,2,1,1,0,0`.
 
+## Samsung: why `--mode vendor` exists
+
+Samsung's configfs glue creates a platform device per gadget directory and never
+frees it, so after a couple of create/remove cycles `mkdir` fails:
+
+```
+$ mkdir /config/usb_gadget/hidkb
+mkdir: '/config/usb_gadget/hidkb': Out of memory       <- -EEXIST in disguise
+$ dmesg | tail -1
+kobject_add_internal failed for android2 with -EEXIST, don't try to register
+things with the same name in the same directory.
+```
+
+No reboot needed: `--mode vendor` (the `auto` fallback) attaches the HID
+function to the gadget the vendor HAL already owns instead. Two more wrinkles
+come with that gadget, both handled automatically:
+
+* a function cannot be linked into a config that is **bound**
+  (`ln: Invalid argument`), so the link happens inside `bind`, right after the
+  gadget is released;
+* a bound function's attributes are frozen (`xwrite: Device or resource busy`),
+  so `setup` only writes values that are actually wrong.
+
+```bash
+./hidkb.py setup --mode vendor    # adds functions/hid.usb0 + configs/b.1/hid.usb0
+./hidkb.py send file.txt --mode vendor
+./hidkb.py teardown --mode vendor # removes them, hands the stock gadget back
+```
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `couldn't find an available UDC or it's busy` | vendor USB HAL re-bound its gadget | do not add any delay between releasing the old gadget and claiming the UDC; `hidkb-lib.sh` already races it |
-| `hidg0 never appeared` | kernel has no `f_hid`, or bind never happened | `doctor`; try `su -c 'modprobe usb_f_hid'` |
+| `mkdir … Out of memory` on setup | Samsung leaks a platform device per gadget dir | `--mode vendor` (auto does it) |
+| `ln: Invalid argument` | linking a function into a *bound* config | automatic: the link is deferred to `bind` |
+| `xwrite: Device or resource busy` | writing attributes of a bound function | automatic: `setup` skips values that already match |
+| `hidg0 never appeared` | no `f_hid` in the kernel, or bind never happened | `doctor` (`/sys/class/hidg` only exists while a function is bound) |
 | `mknod failed` | not root, or no `/sys/class/hidg/hidg0/dev` | check `id -u`; node is only created after a successful bind |
 | host enumerates but nothing is typed | wrong modifier/key slot order, wrong protocol, or the host's text field is not focused | run `selftest --verify` on a Linux host and decode the keycodes |
 | characters permuted (`a`↔`q`, `z`↔`w`) | host layout is AZERTY/QWERTZ | positions are US-QWERTY by design; add a layout map if needed |
