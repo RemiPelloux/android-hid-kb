@@ -30,6 +30,50 @@ adb shell su -c id
 
 ---
 
+## Why this exists: you cannot type the payload by hand
+
+Everything else in this README is machinery for one sentence: **the file being
+typed is bigger than a human can type correctly.**
+
+The payload in question is ns2jb's `bootstrap.bas` — 224 lines, 7 804 bytes,
+7 620 keystrokes once you count newlines, and it has to land in a SmileBASIC 4.4.9
+editor on a locked handheld console. Why hand-typing is not an option:
+
+| Problem | Reality |
+|---|---|
+| Volume | at a fast and error-free 4 keys/s that is **32 minutes** of solid typing |
+| No paste | the console is a USB host, not a terminal. There is no clipboard, no `adb input text`, no file drop into the editor — the only channels are human hands or a USB keyboard |
+| Scrolling | the editor shows ~15 lines. Line 200 is invisible while you type it, so typos are found by *running* the program, not by reading it |
+| Auto-indent | the editor inherits the previous line's leading spaces. Type a line with the “right” spaces by hand and you get double indentation — a syntax error 40 lines later |
+| Case mapping | SmileBASIC's USB path delivers unshifted letters as UPPERCASE, so a plain keyboard types `REM` where the payload needs `rem`-equivalent behaviour; you need Shift for every lowercase letter |
+| Silent failure | this payload *is* a memory-corruption exploit: it discovers ASLR bases at runtime and prints a token. One wrong hex digit does not raise an error — it produces a wrong address, a hang, or a crash, and you cannot tell which line did it |
+| Ephemerality | a usable exploit session is one run long. Retyping after a reboot is not 32 minutes of patience, it is 32 minutes *again*, every time |
+
+The alternatives were all dead ends before this tool was written:
+
+* **USB-C → USB-A adapter + a real keyboard** — not in the bag.
+* **Raspberry Pi Pico / Flipper / Pi Zero as a HID** — same, and it is another
+  device to buy, flash and carry.
+* **Bluetooth keyboard** — Switch 2's Bluetooth is audio-only.
+* **`adb shell input text`** — types into Android's own input stack. The Switch
+  is on the other end of a cable; nothing Android does can reach it.
+* **A pre-built save file** — SmileBASIC saves are encrypted and console-locked,
+  so you cannot author `NS2` on a PC and load it.
+
+So the phone in your pocket, which is already rooted and already has a USB port,
+becomes the keyboard. That is the whole idea: `send` is deterministic
+(`--hold 10 --gap 40` keeps every keystroke on the same schedule instead of
+human jitter), the
+keystroke stream is generated from the file and can be **diffed against a known
+good run** before it is ever sent, and a mistake becomes a bug in a 300-line
+Python file instead of a mystery in a 224-line BASIC listing.
+
+That diffability is not decoration — it is how this repository was validated.
+What has been proven on the console is the transport: the indent test and
+single-word probes land exactly, with correct case and indentation. What is
+checked before every long run is the transcript: the stream generated for the
+224-line `bootstrap.bas` diffs clean against the prototype stream.
+
 ## Quick start
 
 ```bash
@@ -114,9 +158,10 @@ SmileBASIC 4.4.9, and typing it by hand on a console is miserable.
   SmileBASIC's USB path maps an unshifted key to UPPERCASE.
 * `--indent inherit` reproduces the editor's habit of carrying the previous
   line's leading spaces into the new line, so indentation is not doubled.
-* Verified end to end: indentation test, full 224-line bootstrap, and the
-  follow-up `LOAD`/`RUN`/`REMOVE`/`V=START(...)` commands, all typed by the
-  phone, zero manual keystrokes.
+* Proven on hardware: indentation (`0,1,1,2,1,1,0,0`), case handling, and
+  short words arrive exactly. The 224-line transcript is verified by diffing it
+  against the validated prototype stream before it is sent; the full run is the
+  long step, and it is the one that must not be interrupted.
 
 Verify a transfer before using it: `examples/indent-test.bas` must arrive with
 leading-space counts `0,1,1,2,1,1,0,0`.
