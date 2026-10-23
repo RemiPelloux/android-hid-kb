@@ -13,7 +13,7 @@ Bluetooth. Works from a plain `adb shell` as root.
    │ console / PC │            │  configfs gadget → f_hid     │
    │ /dev/input   │            │  /dev/hidg0 ← mksh builtins  │
    └──────────────┘            └──────────────────────────────┘
-        types into the focused window at 50 ms/keystroke, ±1 ms
+        types into the focused window at 75 ms/keystroke, ±1 ms
 ```
 
 Developed and verified against the ephemeral root from
@@ -82,9 +82,15 @@ cd tools/android-hid-kb
 ./hidkb.py doctor                        # can this phone be a USB device at all?
 ./hidkb.py setup                         # create the gadget (port untouched, ADB stays up)
 ./hidkb.py selftest --verify             # bind, type "hello", restore — watch keycodes locally
+./hidkb.py calibrate                     # detect the host's keyboard layout (once per host)
 ./hidkb.py send examples/punctuation.txt # type a real file
 ./hidkb.py teardown                      # remove the gadget, give the port back
 ```
+
+If the host types the *wrong characters* (e.g. `a`→`q`, `1`→`&`), its keyboard
+layout is not US-QWERTY. Run `calibrate` once: it types a probe, you read one
+line back, and it detects the layout + whether the target inverts Shift, saves
+it, and prints the exact `send` command. See **Keyboard layouts** below.
 
 `selftest --verify` on a Linux host must print, in order:
 `LEFTSHIFT down, H down, LEFTSHIFT up, H up, …` — that is the proof the gadget
@@ -117,15 +123,17 @@ Everything on-device is mksh builtins.
 | `selftest` | binds, types `hello`, restores; `--verify` also decodes keycodes on this host |
 | `teardown` | unbinds, removes the gadget, re-binds the stock one |
 | `verify` | runs `pc/watch_input.py` to decode this host's `/dev/input` |
+| `calibrate` | types a known probe, reads back what the host drew, and auto-detects its keyboard layout + Shift-inversion; saves it for `--layout auto` |
 
 ### `send` options
 
 ```
---profile plain|smilebasic   smilebasic = inverted letter case + inherited indentation
---case-invert / --no-case-invert
+--profile plain|smilebasic   smilebasic = inverted Shift on every key + inherited indentation
+--case-invert / --no-case-invert   invert Shift on every glyph key (not just letters)
+--layout auto|us|fr          host keyboard layout (auto = what `calibrate` detected, else us)
 --indent literal|inherit     inherit = send only the *delta* of leading spaces after Enter
---hold MS                    key-down time (default 10)
---gap MS                     between keystrokes (default 40)
+--hold MS                    key-down time (default 15)
+--gap MS                     between keystrokes (default 60)
 --prewait S / --postwait S   extra settle time around the bind
 --backspaces N               send N Backspaces first (clears a dirty editor line)
 --watchdog S                 forced restore if something hangs (default 1800)
@@ -148,12 +156,16 @@ SmileBASIC 4.4.9, and typing it by hand on a console is miserable.
 ```bash
 ./hidkb.py doctor                                    # confirm UDC + f_hid
 ./hidkb.py setup
-./hidkb.py send bootstrap.bas --profile smilebasic --hold 10 --gap 40
-#   → 7620 keystrokes, ~6.5 min
+./hidkb.py calibrate                                 # detect the console's layout (once)
+./hidkb.py send bootstrap.bas --layout fr --profile smilebasic
+#   → 7620 keystrokes, ~9.5 min at the default 75 ms/key
 ```
 
-* `--profile smilebasic` sends **Shift for lowercase** letters, because
-  SmileBASIC's USB path maps an unshifted key to UPPERCASE.
+* `--layout fr` sends **French-AZERTY positions** (the tested Switch 2's
+  SmileBASIC keyboard is French); drop it or use `--layout us` for a US console.
+* `--profile smilebasic` **inverts Shift on every normal key**, because
+  SmileBASIC's USB path renders each key with the opposite Shift state (AltGr
+  keys like `#` `@` are left alone — see **Keyboard layouts**).
 * `--indent inherit` reproduces the editor's habit of carrying the previous
   line's leading spaces into the new line, so indentation is not doubled.
 * Proven on hardware: indentation (`0,1,1,2,1,1,0,0`), case handling, and
@@ -163,6 +175,57 @@ SmileBASIC 4.4.9, and typing it by hand on a console is miserable.
 
 Verify a transfer before using it: `examples/indent-test.bas` must arrive with
 leading-space counts `0,1,1,2,1,1,0,0`.
+
+## Keyboard layouts: when the host types the wrong characters
+
+HID carries key **positions**, not characters. Which glyph a position produces
+is decided by the **host's** active keyboard layout, and the host never tells you
+which one it is. Send US-QWERTY positions to a host set to French AZERTY and you
+get `a`→`q`, `z`→`w`, `1`→`&`, `(`→`5` — the right keys, the wrong letters.
+
+So the tool models the host layout and sends the position that yields each wanted
+character:
+
+```bash
+./hidkb.py calibrate                 # once per host: detect + save its layout
+./hidkb.py send file.bas --layout fr # or just --layout auto after calibrating
+```
+
+* **`calibrate`** types a 26-letter + 10-digit probe into the host's focused
+  field. You read the first line back to it; it scores every known layout, works
+  out whether the target inverts Shift, saves the result for `--layout auto`, and
+  prints the exact `send` command. One line of readback is enough to tell QWERTY
+  from AZERTY.
+* **`--layout {auto,us,fr}`** — `us` is the original 1:1 behaviour; `fr` is full
+  French AZERTY (ISO), including the AltGr third level (`# @ { } [ ] \ | ~ ^`),
+  and covers all printable ASCII. `auto` uses whatever `calibrate` saved (US until
+  you calibrate). Add a layout by dropping a `*_ROWS` table into `hidkb.py`.
+
+### SmileBASIC inverts Shift — on every key but AltGr
+
+Verified on a Switch 2 whose SmileBASIC keyboard is French: the editor renders
+each key with the **opposite Shift state** to what was sent — and not only for
+letters. An unshifted number-row key gives the digit, a shifted one gives the
+symbol, the reverse of a PC. `--profile smilebasic` (or `--case-invert`) flips
+the Shift bit on every normal glyph key so the editor flips it back and letters,
+digits and shifted punctuation all land.
+
+The one exception is **AltGr**: those keys (`#` `@` `{` `}` `[` `]` `\` `|` `~`
+`^`) are *not* Shift-inverted by SmileBASIC and render normally — but `AltGr+Shift`
+is dropped by the console, so the tool never adds Shift to an AltGr key. This was
+found the honest way: a first run printed `#` and `@` fine; adding a blanket
+Shift-invert made them vanish; the fix leaves AltGr keys alone.
+
+So the working recipe for a French Switch 2 is:
+
+```bash
+./hidkb.py send bootstrap.bas --layout fr --profile smilebasic
+```
+
+If your console's keyboard language is set to **English (US)** instead, none of
+this applies: `--layout us` maps 1:1 and only `--profile smilebasic` (the Shift
+inversion) is needed. Changing the console's keyboard to US is the simplest fix
+of all when you can.
 
 ## Samsung: why `--mode vendor` exists
 
@@ -268,7 +331,9 @@ wanted for the target.
 | `hidg0 never appeared` | no `f_hid` in the kernel, or bind never happened | `doctor` (`/sys/class/hidg` only exists while a function is bound) |
 | `mknod failed` | not root, or no `/sys/class/hidg/hidg0/dev` | check `id -u`; node is only created after a successful bind |
 | host enumerates but nothing is typed | wrong modifier/key slot order, wrong protocol, or the host's text field is not focused | run `selftest --verify` on a Linux host and decode the keycodes |
-| characters permuted (`a`↔`q`, `z`↔`w`) | host layout is AZERTY/QWERTZ | positions are US-QWERTY by design; add a layout map if needed |
+| characters permuted (`a`↔`q`, `z`↔`w`, `1`↔`&`) | host layout is not US-QWERTY (AZERTY/QWERTZ) | `./hidkb.py calibrate`, then `--layout fr` (or `--layout auto`) |
+| digits/symbols shifted (`1`→`&`, `(`→`5`) but letters fine | target inverts Shift on every key (SmileBASIC) | `--profile smilebasic` (or `--case-invert`) |
+| `#` `@` `{` `[` … drop out | AltGr key sent with Shift, which the console ignores | automatic: the tool never adds Shift to an AltGr key; update if you see it |
 | typed text is uppercase where it should be lowercase | the target inverts case (SmileBASIC) | `--profile smilebasic` or `--case-invert` |
 | indentation doubles each line | target editor inherits indentation | `--indent inherit` |
 | ADB/MTP gone after a run | gadget still bound | `hidkb.py teardown`; the trap/watchdog normally does it already |

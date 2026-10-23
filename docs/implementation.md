@@ -254,7 +254,7 @@ no ADB is unpleasant.
 Over Wi-Fi ADB the disconnect does not even matter: `adb tcpip 5555` +
 `adb connect <ip>:5555` keeps the control channel alive while the port is busy.
 
-## 9. Keyboard layouts on editors that "inherit" indentation
+## 9. Indentation on editors that "inherit" it
 
 Some line editors (SmileBASIC is one) carry the previous line's leading spaces
 into the new line after Enter. Sending leading spaces literally then doubles the
@@ -262,12 +262,49 @@ indentation. `--indent inherit` computes only the delta — spaces when the next
 line is deeper, Backspaces when it is shallower. It never uses Home/End and never
 guesses from keywords.
 
-## 10. Case inversion
+## 10. Host keyboard layout: positions, not characters
 
-SmileBASIC's editor maps an unshifted letter key to an **uppercase** character
-(the on-screen keyboard is the normal path, the USB keyboard path inverts). So
-typing `PRINT` literally yields `print`. The `smilebasic` profile sends Shift for
-lowercase letters in the source file, which reproduces the file exactly.
+HID sends key **positions** (usages); the glyph is chosen by the *host's* layout,
+which the device cannot read. Send US-QWERTY positions to a French-AZERTY host and
+every key is "right" but mislabelled: `a`→`q`, `z`→`w`, `1`→`&`, `(`→`5`.
+
+`hidkb.py` therefore carries layout tables (`US_ROWS`, `FR_ROWS`), each a list of
+`(usage, plain, shifted, altgr)` rows describing what that position *produces* on
+that host. `Layout` inverts them into `glyph -> (modifiers, usage)`. `--layout`
+picks one; `calibrate` detects it:
+
+* `calibrate` types a fixed probe (26 letter positions, then the 10 number-row
+  positions, all unshifted) and asks the operator to read the first line back. It
+  scores that readback against every layout's predicted output, in both Shift
+  polarities, and picks the best — one line is enough to separate QWERTY from
+  AZERTY and to reveal Shift-inversion. The result is saved for `--layout auto`.
+
+French AZERTY needs a third modifier level, AltGr = **Right Alt** (`0x40` in the
+modifier byte), for `# @ { } [ ] \ | ~ ^`. `FR_ROWS` carries those in the `altgr`
+column, and the inverse map emits `MOD_RALT` for them. With AltGr the `fr` layout
+covers all printable ASCII.
+
+## 11. Shift inversion (SmileBASIC), and the AltGr exception
+
+SmileBASIC's USB path renders each key with the **opposite Shift state** to what
+was sent. It is not only letters, as first assumed: on a Switch 2 the unshifted
+number row gave digits and the shifted row gave symbols — reversed from a PC. So
+`PRINT` typed literally yields `print`, and `1` typed literally yields `&`.
+
+`--profile smilebasic` (`--case-invert`) flips the Shift bit on every normal glyph
+key; the editor flips it back, so letters, digits and shifted punctuation all land
+exactly as in the source. Two keys are left untouched on purpose:
+
+* **Enter / Tab / Space** — `Shift+Enter` can mean something else to an editor, so
+  control keys are never Shift-flipped.
+* **AltGr keys** — SmileBASIC does *not* invert Shift for the third level, and the
+  console **drops `AltGr+Shift`** entirely. A first run printed `#` and `@`
+  correctly from a bare `AltGr`; a blanket Shift-invert then made them disappear.
+  The fix is one guard: never add Shift to a key that already carries AltGr
+  (`if shift_invert and not (mods & MOD_RALT)`).
+
+This was validated on hardware: `Hello #1 @home (x)` and `a=1+2*(3-4)/5` arrive
+byte-for-byte on a French Switch 2 with `--layout fr --profile smilebasic`.
 
 ---
 
@@ -276,8 +313,8 @@ lowercase letters in the source file, which reproduces the file exactly.
 | step | time |
 |---|---|
 | gadget bind | ~10 ms |
-| one keystroke (`--hold 10 --gap 40`) | 50 ms |
-| 7 620 keystrokes | ~6.5 min |
+| one keystroke (default `--hold 15 --gap 60`) | 75 ms |
+| 7 620 keystrokes | ~9.5 min |
 | `hello` smoke test | ~1 s |
 
 ### Reference material

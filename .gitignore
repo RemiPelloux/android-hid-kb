@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 *.log
+
+# per-machine calibrated layout (written by `hidkb.py calibrate`)
+.hidkb-layout
