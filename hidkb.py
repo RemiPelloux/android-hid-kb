@@ -39,6 +39,7 @@ REMOTE_DIR = "/data/local/tmp"
 REMOTE_LIB = f"{REMOTE_DIR}/hidkb-lib.sh"
 REMOTE_DESC = f"{REMOTE_DIR}/hidkb-report_desc.bin"
 REMOTE_RUN = f"{REMOTE_DIR}/hidkb-run.sh"
+REMOTE_PROBE = f"{REMOTE_DIR}/hidkb-probe.sh"
 REMOTE_LOG = f"{REMOTE_DIR}/hidkb.log"
 REMOTE_OWNER = f"{REMOTE_DIR}/hidkb-owner"
 
@@ -278,16 +279,16 @@ def push(serial, local, remote):
     adb(serial, ["push", str(local), remote], check=True, timeout=120)
 
 
-def su_shell(serial, body, *, timeout=120, capture=True):
+def su_shell(serial, body, *, timeout=120, capture=True, remote=REMOTE_RUN):
     """Push a tiny script and run it as root (KernelSU/Magisk `su -c`)."""
     with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
         fh.write(body)
         path = fh.name
     try:
-        push(serial, path, REMOTE_RUN)
+        push(serial, path, remote)
     finally:
         os.unlink(path)
-    return adb(serial, ["shell", f"su -c 'sh {REMOTE_RUN}'"], timeout=timeout, capture=capture)
+    return adb(serial, ["shell", f"su -c 'sh {remote}'"], timeout=timeout, capture=capture)
 
 
 def ensure_remote_env(serial, gadget=DEFAULT_GADGET):
@@ -310,7 +311,7 @@ def gadget_attached(serial, gadget):
             "hidkb_locate >/dev/null 2>&1 || exit 0\n"
             "hidkb_attached && echo ATTACHED\n")
     try:
-        res = su_shell(serial, body, timeout=60)
+        res = su_shell(serial, body, timeout=60, remote=REMOTE_PROBE)
     except Exception:
         return False
     return "ATTACHED" in (res.stdout or "")
